@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Age detector — autostart, no on-screen text, TG-style modals</title>
+
+<!-- face-api (vladmandic build) -->
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+
+<style>
+  :root{
+    --bg:#000;
+    --tick: rgba(120,120,120,0.22);
+    --accent: #ffd800;
+    --ok: #4bbf56;
+    --bad: #ff4d4f;
+    --circle-size: 360px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;font-family:Inter, Roboto, "Segoe UI", system-ui, sans-serif}
+  html,body{height:100%}
+  body{
+    background:var(--bg);
+    color:#fff;
+    display:flex;
+    align-items:flex-start;
+    justify-content:center;
+    padding-top:36px;
+    overflow:hidden;
+  }
+
+  .stage{ width:100%; max-width:420px; text-align:center; padding:12px; }
+
+  .circle-wrap{
+    position:relative;
+    width:var(--circle-size);
+    height:var(--circle-size);
+    margin:0 auto;
+    border-radius:50%;
+    overflow:visible;
+  }
+
+  .video-mask{
+    position:absolute;
+    inset:0;
+    border-radius:50%;
+    overflow:hidden;
+    box-shadow: inset 0 10px 40px rgba(0,0,0,0.85), 0 6px 30px rgba(0,0,0,0.6);
+    background: radial-gradient(circle at 40% 40%, rgba(255,255,255,0.02), rgba(0,0,0,0.65));
+  }
+  video#video { width:100%; height:100%; object-fit:cover; object-position:center center; transform:scaleX(-1); }
+
+  .ring {
+    position:absolute;
+    inset:0;
+    border-radius:50%;
+    pointer-events:none;
+    background:
+      repeating-conic-gradient(from -90deg, var(--tick) 0deg 3.6deg, transparent 3.6deg 7.2deg);
+    mask: radial-gradient(farthest-side, transparent calc(100% - 24px), black calc(100% - 24px));
+    opacity:0.95;
+  }
+
+  /* original working rotating highlight arc */
+  .active {
+    position:absolute;
+    inset:0;
+    border-radius:50%;
+    pointer-events:none;
+    mask: radial-gradient(farthest-side, transparent calc(100% - 24px), black calc(100% - 24px));
+    background: conic-gradient(transparent 0deg var(--deg, 60deg), var(--accent) var(--deg,60deg) calc(var(--deg,60deg) + 24deg), transparent calc(var(--deg,60deg) + 24deg) 360deg);
+    filter: drop-shadow(0 6px 12px rgba(255,200,10,0.06));
+    animation: spin 3.2s linear infinite;
+    transition: background-color 300ms linear, --deg 200ms linear;
+  }
+  @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
+  .active.ok { --accent: var(--ok); }
+  .active.bad { --accent: var(--bad); }
+
+  /* Hide any UI text — nothing shown except modals */
+  .hidden { display:none !important; }
+
+  /* Telegram-like modals (acrylic, less transparent than before) */
+  .modal-backdrop{
+    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background: rgba(0,0,0,0.45); z-index:999; visibility:hidden; opacity:0; transition:opacity 180ms ease;
+    -webkit-backdrop-filter: blur(6px) ; backdrop-filter: blur(6px);
+  }
+  .modal{
+    width:min(440px,92%); padding:18px 18px; border-radius:14px;
+    background: linear-gradient(210deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03));
+    border:1px solid rgba(255,255,255,0.06); color:#fff; box-shadow: 0 12px 40px rgba(0,0,0,0.7);
+    backdrop-filter: blur(10px) saturate(120%);
+    text-align:center;
+  }
+  .modal .title{ font-size:18px; font-weight:700; margin-bottom:8px; }
+  .modal .desc{ font-size:14px; color:rgba(255,255,255,0.92); margin-bottom:16px; line-height:1.35; }
+
+  .btn-row{ display:flex; gap:12px; justify-content:center; }
+  button.btn { border:0; background:transparent; color:#eaf4ff; padding:8px 10px; font-weight:700; cursor:pointer; border-radius:8px; font-size:14px; }
+  button.btn.ghost{ color:rgba(255,255,255,0.95); }
+  button.btn.danger{ color:#ffb4b4; }
+  button.btn.ok{ color:#bff7d1; }
+
+  .modal-backdrop.show { visibility:visible; opacity:1; }
+
+  @media (max-width:420px){ :root{ --circle-size:300px } .modal{ padding:14px } }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="circle-wrap" id="circle">
+      <div class="video-mask">
+        <video id="video" autoplay muted playsinline></video>
+      </div>
+
+      <div class="ring" aria-hidden="true"></div>
+      <div class="active" id="active" style="--deg:40deg;"></div>
+    </div>
+  </div>
+
+  <!-- MODALS: persistent (do NOT auto-close) -->
+  <div class="modal-backdrop" id="denyModal" aria-hidden="true">
+    <div class="modal">
+      <div class="title">Доступ запрещён</div>
+      <div class="desc">Возраст не подтверждён.</div>
+      <div class="btn-row">
+        <button class="btn ghost danger" id="denyCloseBtn">Закрыть страницу</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="notFoundModal" aria-hidden="true">
+    <div class="modal">
+      <div class="title">Лицо не распознано</div>
+      <div class="desc">Лицо не распознано. Проверьте освещение и нажмите «Повторить».</div>
+      <div class="btn-row">
+        <button class="btn ghost" id="retryBtn">Повторить</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="allowModal" aria-hidden="true">
+    <div class="modal">
+      <div class="title">Доступ разрешён</div>
+      <div class="desc">Возраст подтверждён.</div>
+      <div class="btn-row">
+        <button class="btn ghost ok" id="allowOkBtn">ОК</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(async () => {
+  const MODEL_URL = 'https://unpkg.com/@vladmandic/face-api@1.5.7/model';
+
+  const video = document.getElementById('video');
+  const active = document.getElementById('active');
+
+  const denyModal = document.getElementById('denyModal');
+  const notFoundModal = document.getElementById('notFoundModal');
+  const allowModal = document.getElementById('allowModal');
+
+  const retryBtn = document.getElementById('retryBtn');
+  const denyCloseBtn = document.getElementById('denyCloseBtn');
+  const allowOkBtn = document.getElementById('allowOkBtn');
+
+  // params
+  const INPUT_SIZE = 128;
+  const INTERVAL = 600;
+  const MAX_NOT_FOUND = 6;
+  const SMOOTH_ALPHA = 0.3;
+
+  let stream = null;
+  let lastAge = null;
+  let notFoundCount = 0;
+  let detectIntervalId = null;
+
+  function showModal(modal){
+    modal.classList.add('show');
+    modal.setAttribute('aria-hidden','false');
+  }
+  function hideModal(modal){
+    modal.classList.remove('show');
+    modal.setAttribute('aria-hidden','true');
+  }
+
+  function setActive(startDeg, arcDeg, state){
+    active.style.setProperty('--deg', arcDeg + 'deg'); // keep same design: deg controls arc position/size
+    active.classList.remove('ok','bad');
+    if (state === 'ok') active.classList.add('ok');
+    if (state === 'bad') active.classList.add('bad');
+  }
+
+  async function loadModels(){
+    try {
+      await Promise.all([
+        faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+        faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+        faceapi.nets.ageGenderNet.loadFromUri(MODEL_URL)
+      ]);
+      console.log('models loaded');
+      return true;
+    } catch (e) {
+      console.error('model load failed', e);
+      return false;
+    }
+  }
+
+  async function startCamera(){
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'user', width:{ideal:1280}, height:{ideal:720} }, audio:false });
+      video.srcObject = stream;
+      await video.play();
+      console.log('camera started');
+      return true;
+    } catch (e) {
+      console.warn('camera start failed', e);
+      return false;
+    }
+  }
+
+  function tryClosePage(){
+    try { window.close(); } catch(e){ }
+    try { window.location.href = 'about:blank'; } catch(e){ }
+  }
+
+  // detection step
+  async function detectStep(){
+    try {
+      const options = new faceapi.TinyFaceDetectorOptions({ inputSize: INPUT_SIZE, scoreThreshold: 0.45 });
+      const res = await faceapi.detectSingleFace(video, options).withFaceLandmarks().withAgeAndGender();
+
+      if (!res) {
+        notFoundCount++;
+        // animate arc shrink a bit for feedback
+        const cur = parseFloat(getComputedStyle(active).getPropertyValue('--deg')) || 40;
+        const nextArc = Math.max(12, cur - 4);
+        setActive((Date.now()/10)%360, nextArc, null);
+        if (notFoundCount >= MAX_NOT_FOUND) {
+          clearInterval(detectIntervalId);
+          showModal(notFoundModal); // persistent until user presses retry
+        }
+        return;
+      }
+
+      notFoundCount = 0;
+      // visual feedback using detection score
+      const conf = Math.round((res.detection.score || 0.6) * 100);
+      const arcDeg = Math.max(18, Math.min(120, 12 + Math.min(120, conf)));
+      setActive((Date.now()/10)%360, arcDeg, null);
+
+      if (res.age != null) {
+        const raw = Math.round(res.age);
+        const smooth = lastAge == null ? raw : Math.round(lastAge*(1 - SMOOTH_ALPHA) + raw*SMOOTH_ALPHA);
+        lastAge = smooth;
+        const min = smooth - 2;
+        if (min >= 18) {
+          setActive((Date.now()/10)%360, arcDeg, 'ok');
+          clearInterval(detectIntervalId);
+          showModal(allowModal); // persistent until user clicks OK
+        } else {
+          setActive((Date.now()/10)%360, arcDeg, 'bad');
+          clearInterval(detectIntervalId);
+          showModal(denyModal); // persistent until user chooses to close
+        }
+      }
+    } catch (e) {
+      console.error('detect error', e);
+    }
+  }
+
+  // retry behavior: hide modal and restart detection
+  retryBtn.addEventListener('click', async () => {
+    hideModal(notFoundModal);
+    notFoundCount = 0;
+    lastAge = null;
+    // ensure camera running
+    if (!stream) {
+      const camOk = await startCamera();
+      if (!camOk) { showModal(notFoundModal); return; }
+    }
+    detectIntervalId = setInterval(detectStep, INTERVAL);
+    detectStep();
+  });
+
+  // deny close button: will try to close page if user wants
+  denyCloseBtn.addEventListener('click', () => {
+    tryClosePage();
+  });
+
+  // allow OK: just hide modal (user decides what to do next)
+  allowOkBtn.addEventListener('click', () => {
+    hideModal(allowModal);
+    // optionally keep camera running — detection stopped intentionally
+  });
+
+  // cleanup
+  window.addEventListener('beforeunload', () => {
+    if (detectIntervalId) clearInterval(detectIntervalId);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+  });
+
+  // AUTOSTART SEQUENCE (attempt)
+  (async () => {
+    const okModels = await loadModels();
+    if (!okModels) {
+      // show notFound modal so user can retry — models failed to load (network/CORS)
+      showModal(notFoundModal);
+      return;
+    }
+    const camOk = await startCamera();
+    if (!camOk) {
+      // camera permission blocked/needs gesture — show notFound modal (persistent)
+      showModal(notFoundModal);
+      return;
+    }
+    // start detection loop
+    detectIntervalId = setInterval(detectStep, INTERVAL);
+    detectStep();
+  })();
+
+})();
+</script>
+</body>
+</html>
